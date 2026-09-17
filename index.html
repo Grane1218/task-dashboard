@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>任务面板 · Task Dashboard</title>
+    <script>
+      try {
+        var s = JSON.parse(localStorage.getItem('task-dashboard-storage') || '{}');
+        var theme = (s.state && s.state.theme) || 'dark';
+        if (theme === 'dark') document.documentElement.classList.add('dark');
+        else document.documentElement.classList.remove('dark');
+      } catch (e) {}
+    </script>
+    <script>
+      // 关掉浏览器页面即停止项目：加载时登记，关闭/刷新时通知开发服务器
+      if ('sendBeacon' in navigator) {
+        try { fetch('/__hello', { method: 'POST' }).catch(function () {}); } catch (e) {}
+        window.addEventListener('pagehide', function () {
+          try { navigator.sendBeacon('/__bye'); } catch (e) {}
+        });
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
