@@ -1,4 +1,4 @@
-# 任务面板 · Task Dashboard
+# 任务看板 · Task Dashboard
 
 使用 React 18 + TypeScript（严格模式）+ Tailwind CSS + Zustand 构建的单页任务看板应用。
 
