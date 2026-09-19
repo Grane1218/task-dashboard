@@ -33,22 +33,23 @@ export default function TaskCard({ task, onEdit, onDelete, onFocus, overlay = fa
   const inFocus = focusTaskId === task.id;
   const focusBlocked = focusTaskId !== null && !inFocus;
 
-  const handleToggleDone = () => {
+  const handleToggleDone = async () => {
     const completing = task.status !== 'done';
     const wasOverdue = isOverdue(task.startDate, task.dueDate, task.status);
     if (completing && task.repeat !== undefined) {
-      const next = completeRecurring(task.id);
+      const next = await completeRecurring(task.id);
+      if (next === undefined) return; // 云写失败，store 已提示
       if (next !== null) addToast('任务已完成，已生成下一周期任务');
       else addToast(wasOverdue ? '任务已完成（已逾期）' : '任务已完成');
       return;
     }
-    toggleDone(task.id);
-    if (completing) addToast(wasOverdue ? '任务已完成（已逾期）' : '任务已完成');
+    const ok = await toggleDone(task.id);
+    if (ok && completing) addToast(wasOverdue ? '任务已完成（已逾期）' : '任务已完成');
   };
 
-  const handleArchive = () => {
-    archiveTask(task.id);
-    addToast('任务已归档，可在看板下方恢复');
+  const handleArchive = async () => {
+    const ok = await archiveTask(task.id);
+    if (ok) addToast('任务已归档，可在看板下方恢复');
   };
 
   return (

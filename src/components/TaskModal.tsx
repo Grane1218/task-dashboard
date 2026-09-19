@@ -83,7 +83,7 @@ export default function TaskModal({ open, task, onClose, initialStartDate = null
     setForm((prev) => ({ ...prev, [key]: value }));
   };
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const title = form.title.trim();
     if (title === '') {
@@ -92,8 +92,9 @@ export default function TaskModal({ open, task, onClose, initialStartDate = null
     }
     const dueDate = noDue ? '' : form.dueDate;
     const repeat = form.repeat === 'none' ? undefined : form.repeat;
+    let saved = false;
     if (task) {
-      updateTask(task.id, {
+      saved = await updateTask(task.id, {
         title,
         description: form.description.trim(),
         priority: form.priority,
@@ -101,9 +102,9 @@ export default function TaskModal({ open, task, onClose, initialStartDate = null
         dueDate,
         repeat,
       });
-      addToast('任务已更新');
+      if (saved) addToast('任务已更新');
     } else {
-      addTask({
+      const created = await addTask({
         title,
         description: form.description.trim(),
         priority: form.priority,
@@ -111,9 +112,13 @@ export default function TaskModal({ open, task, onClose, initialStartDate = null
         dueDate,
         repeat,
       });
-      addToast('任务已创建');
+      if (created !== null) {
+        saved = true;
+        addToast('任务已创建');
+      }
     }
-    onClose();
+    // 云写失败时 store 已提示「同步失败」，保持弹窗打开便于重试
+    if (saved) onClose();
   };
 
   return (

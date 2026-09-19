@@ -3,3 +3,19 @@ dist
 .npm-cache
 *.local
 .DS_Store
+
+# 环境变量（含真实云环境 ID，勿提交）
+.env
+
+# 日志与临时文件
+dev-server.log
+tmp-verify-import
+
+# 微信开发者工具生成的本地配置
+project.config.json
+project.private.config.json
+
+# 本地脚本与计划文件
+启动任务面板.vbs
+停止任务面板.vbs
+task-dashboard-sept-plan-*.json

@@ -2,8 +2,10 @@ import { useRef, useState, type ChangeEvent } from 'react';
 import { BarChart3, Bell, CalendarDays, CheckSquare, Download, ListChecks, Moon, Plus, Sun, Upload } from 'lucide-react';
 import type { View } from '../types';
 import { useTaskStore } from '../store/useTaskStore';
+import { useHabitStore } from '../store/useHabitStore';
 import { useToastStore } from '../store/useToastStore';
 import { exportDataToFile, importDataFromText, type ImportMode } from '../utils/backup';
+import { isCloudConfigured, uploadLocalToCloud } from '../lib/cloud';
 import ImportModal from './ImportModal';
 
 interface HeaderProps {
@@ -45,7 +47,7 @@ export default function Header({ view, onSwitchView, onOpenSettings, onCreate }:
     event.target.value = '';
   };
 
-  const handleImport = (mode: ImportMode) => {
+  const handleImport = async (mode: ImportMode) => {
     const text = pendingImportText;
     setPendingImportText(null);
     if (text === null) return;
@@ -57,18 +59,34 @@ export default function Header({ view, onSwitchView, onOpenSettings, onCreate }:
     const s = result.stats;
     if (mode === 'overwrite') {
       addToast('覆盖导入完成：已替换 ' + (s?.tasksAdded ?? 0) + ' 个任务、' + (s?.habitsAdded ?? 0) + ' 个习惯');
-      return;
-    }
-    const parts: string[] = [];
-    if (s) {
-      if (s.tasksAdded > 0) parts.push('新增 ' + s.tasksAdded + ' 个任务');
-      if (s.habitsAdded > 0) parts.push('新增 ' + s.habitsAdded + ' 个习惯');
-      if (s.tasksSkipped + s.habitsSkipped > 0) {
-        parts.push('跳过 ' + (s.tasksSkipped + s.habitsSkipped) + ' 条已存在');
+    } else {
+      const parts: string[] = [];
+      if (s) {
+        if (s.tasksAdded > 0) parts.push('新增 ' + s.tasksAdded + ' 个任务');
+        if (s.habitsAdded > 0) parts.push('新增 ' + s.habitsAdded + ' 个习惯');
+        if (s.tasksSkipped + s.habitsSkipped > 0) {
+          parts.push('跳过 ' + (s.tasksSkipped + s.habitsSkipped) + ' 条已存在');
+        }
+        if (s.completionsMerged > 0) parts.push('合并 ' + s.completionsMerged + ' 天打卡记录');
       }
-      if (s.completionsMerged > 0) parts.push('合并 ' + s.completionsMerged + ' 天打卡记录');
+      addToast(parts.length > 0 ? '导入完成：' + parts.join('，') + '（原有数据保留）' : '导入完成：没有新增数据');
     }
-    addToast(parts.length > 0 ? '导入完成：' + parts.join('，') + '（原有数据保留）' : '导入完成：没有新增数据');
+    // 导入直接改写了 store，将全量推送到云端（幂等，可重跑）
+    if (isCloudConfigured()) {
+      const taskState = useTaskStore.getState();
+      const habitState = useHabitStore.getState();
+      const upload = await uploadLocalToCloud({
+        tasks: taskState.tasks,
+        templates: habitState.templates,
+        completions: habitState.completions,
+        settings: {
+          taskReminder: taskState.reminderSettings,
+          habitReminder: habitState.reminderSettings,
+          theme: taskState.theme,
+        },
+      });
+      if (!upload.ok) addToast('导入已生效，但云端同步失败，请稍后重新导入一次（不会自动补齐）', 'error');
+    }
   };
 
   return (

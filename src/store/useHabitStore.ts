@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { CompletionMap, HabitReminderSettings, TaskTemplate } from '../types/habit';
+import { upsertTemplate, removeTemplate, upsertCompletion, writeThrough } from '../lib/cloud';
+import { useToastStore } from './useToastStore';
 
 export const DEFAULT_HABIT_REMINDER_SETTINGS: HabitReminderSettings = {
   enabled: false,
@@ -15,13 +17,13 @@ interface HabitStoreState {
   templates: TaskTemplate[];
   completions: CompletionMap;
   reminderSettings: HabitReminderSettings;
-  addTemplate: (input: { title: string; emoji?: string; category?: string }) => TaskTemplate;
-  updateTemplate: (id: string, updates: Partial<Omit<TaskTemplate, 'id' | 'createdAt'>>) => void;
-  deleteTemplate: (id: string) => void;
-  archiveTemplate: (id: string) => void;
-  unarchiveTemplate: (id: string) => void;
-  toggleCompletion: (templateId: string, date: string) => void;
-  setCompleted: (templateId: string, date: string, done: boolean) => void;
+  addTemplate: (input: { title: string; emoji?: string; category?: string }) => Promise<TaskTemplate | null>;
+  updateTemplate: (id: string, updates: Partial<Omit<TaskTemplate, 'id' | 'createdAt'>>) => Promise<boolean>;
+  deleteTemplate: (id: string) => Promise<boolean>;
+  archiveTemplate: (id: string) => Promise<boolean>;
+  unarchiveTemplate: (id: string) => Promise<boolean>;
+  toggleCompletion: (templateId: string, date: string) => Promise<boolean>;
+  setCompleted: (templateId: string, date: string, done: boolean) => Promise<boolean>;
   updateReminderSettings: (updates: Partial<HabitReminderSettings>) => void;
   recordReminderSent: (timestamp: number) => void;
 }
@@ -33,14 +35,18 @@ function createId(): string {
   return Date.now() + '-' + Math.random().toString(36).slice(2, 9);
 }
 
+function syncFail(message: string): void {
+  useToastStore.getState().addToast(message, 'error');
+}
+
 export const useHabitStore = create<HabitStoreState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       templates: [],
       completions: {},
       reminderSettings: DEFAULT_HABIT_REMINDER_SETTINGS,
 
-      addTemplate: (input) => {
+      addTemplate: async (input) => {
         const template: TaskTemplate = {
           id: createId(),
           title: input.title,
@@ -48,53 +54,101 @@ export const useHabitStore = create<HabitStoreState>()(
           category: input.category?.trim() === '' ? undefined : input.category?.trim(),
           createdAt: new Date().toISOString(),
         };
+        if (!(await writeThrough(() => upsertTemplate(template)))) {
+          syncFail('同步失败，习惯未添加');
+          return null;
+        }
         set((state) => ({ templates: [...state.templates, template] }));
         return template;
       },
 
-      updateTemplate: (id, updates) =>
+      updateTemplate: async (id, updates) => {
+        const existing = get().templates.find((t) => t.id === id);
+        if (existing === undefined) return false;
+        const merged: TaskTemplate = { ...existing, ...updates };
+        if (!(await writeThrough(() => upsertTemplate(merged)))) {
+          syncFail('同步失败，习惯未更新');
+          return false;
+        }
         set((state) => ({
-          templates: state.templates.map((t) => (t.id === id ? { ...t, ...updates } : t)),
-        })),
+          templates: state.templates.map((t) => (t.id === id ? merged : t)),
+        }));
+        return true;
+      },
 
-      deleteTemplate: (id) =>
+      deleteTemplate: async (id) => {
+        if (!(await writeThrough(() => removeTemplate(id)))) {
+          syncFail('同步失败，习惯未删除');
+          return false;
+        }
         set((state) => {
           const completions: CompletionMap = {};
           for (const key of Object.keys(state.completions)) {
             const ids = state.completions[key].filter((x) => x !== id);
             if (ids.length > 0) completions[key] = ids;
+            // 同步清理云端打卡记录里的残留 id
+            void upsertCompletion(key, ids);
           }
           return { templates: state.templates.filter((t) => t.id !== id), completions };
-        }),
+        });
+        return true;
+      },
 
-      archiveTemplate: (id) =>
+      archiveTemplate: async (id) => {
+        const existing = get().templates.find((t) => t.id === id);
+        if (existing === undefined) return false;
+        const merged: TaskTemplate = { ...existing, archived: true };
+        if (!(await writeThrough(() => upsertTemplate(merged)))) {
+          syncFail('同步失败，习惯未归档');
+          return false;
+        }
         set((state) => ({
-          templates: state.templates.map((t) => (t.id === id ? { ...t, archived: true } : t)),
-        })),
+          templates: state.templates.map((t) => (t.id === id ? merged : t)),
+        }));
+        return true;
+      },
 
-      unarchiveTemplate: (id) =>
+      unarchiveTemplate: async (id) => {
+        const existing = get().templates.find((t) => t.id === id);
+        if (existing === undefined) return false;
+        const merged: TaskTemplate = { ...existing, archived: false };
+        if (!(await writeThrough(() => upsertTemplate(merged)))) {
+          syncFail('同步失败，习惯未恢复');
+          return false;
+        }
         set((state) => ({
-          templates: state.templates.map((t) => (t.id === id ? { ...t, archived: false } : t)),
-        })),
+          templates: state.templates.map((t) => (t.id === id ? merged : t)),
+        }));
+        return true;
+      },
 
-      toggleCompletion: (templateId, date) =>
-        set((state) => {
-          const day = state.completions[date] ?? [];
-          const has = day.includes(templateId);
-          const next = has ? day.filter((x) => x !== templateId) : [...day, templateId];
-          return { completions: { ...state.completions, [date]: next } };
-        }),
+      toggleCompletion: async (templateId, date) => {
+        const day = get().completions[date] ?? [];
+        const has = day.includes(templateId);
+        const next = has ? day.filter((x) => x !== templateId) : [...day, templateId];
+        if (!(await writeThrough(() => upsertCompletion(date, next)))) {
+          syncFail('同步失败，打卡未保存');
+          return false;
+        }
+        set((state) => ({ completions: { ...state.completions, [date]: next } }));
+        return true;
+      },
 
-      setCompleted: (templateId, date, done) =>
-        set((state) => {
-          const day = state.completions[date] ?? [];
-          const has = day.includes(templateId);
-          if (has === done) return state;
-          const next = done ? [...day, templateId] : day.filter((x) => x !== templateId);
-          return { completions: { ...state.completions, [date]: next } };
-        }),
+      setCompleted: async (templateId, date, done) => {
+        const day = get().completions[date] ?? [];
+        const has = day.includes(templateId);
+        if (has === done) return true;
+        const next = done ? [...day, templateId] : day.filter((x) => x !== templateId);
+        if (!(await writeThrough(() => upsertCompletion(date, next)))) {
+          syncFail('同步失败，打卡未保存');
+          return false;
+        }
+        set((state) => ({ completions: { ...state.completions, [date]: next } }));
+        return true;
+      },
 
       updateReminderSettings: (updates) =>
+        // 本地立即生效；云端弱一致推送由 App 层统一监听后执行
         set((state) => ({ reminderSettings: { ...state.reminderSettings, ...updates } })),
 
       recordReminderSent: (timestamp) =>

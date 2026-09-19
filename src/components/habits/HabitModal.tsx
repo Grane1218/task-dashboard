@@ -50,7 +50,7 @@ export default function HabitModal({ open, habit, onClose }: HabitModalProps) {
     setForm((prev) => ({ ...prev, [key]: value }));
   };
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const title = form.title.trim();
     if (title === '') {
@@ -59,22 +59,27 @@ export default function HabitModal({ open, habit, onClose }: HabitModalProps) {
     }
     const emoji = form.emoji.trim();
     const category = form.category.trim();
+    let saved = false;
     if (habit) {
-      updateTemplate(habit.id, {
+      saved = await updateTemplate(habit.id, {
         title,
         emoji: emoji === '' ? undefined : emoji,
         category: category === '' ? undefined : category,
       });
-      addToast('习惯已更新');
+      if (saved) addToast('习惯已更新');
     } else {
-      addTemplate({
+      const created = await addTemplate({
         title,
         emoji: emoji === '' ? undefined : emoji,
         category: category === '' ? undefined : category,
       });
-      addToast('习惯已添加');
+      if (created !== null) {
+        saved = true;
+        addToast('习惯已添加');
+      }
     }
-    onClose();
+    // 云写失败时 store 已提示「同步失败」，保持弹窗打开便于重试
+    if (saved) onClose();
   };
 
   return (

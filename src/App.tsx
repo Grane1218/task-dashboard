@@ -29,6 +29,15 @@ import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { isOverdue } from './utils/date';
 import { buildNotificationBody, NOTIFICATION_TITLE, showSystemNotification } from './utils/notificationHelper';
 import {
+  getCloudStatus,
+  hydrateFromCloud,
+  isCloudConfigured,
+  onCloudStatusChange,
+  pushSettings,
+  uploadLocalToCloud,
+  type CloudStatus,
+} from './lib/cloud';
+import {
   dismissStartupForToday,
   isInAnyQuietHours,
   readStartupState,
@@ -39,6 +48,8 @@ export default function App() {
   const tasks = useTaskStore((state) => state.tasks);
   const theme = useTaskStore((state) => state.theme);
   const setTheme = useTaskStore((state) => state.setTheme);
+  const reminderSettings = useTaskStore((state) => state.reminderSettings);
+  const habitReminder = useHabitStore((state) => state.reminderSettings);
   const addToast = useToastStore((state) => state.addToast);
 
   const reminders = useReminders();
@@ -63,6 +74,60 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
   }, [theme]);
+
+  // —— 云端：状态订阅 / 设置弱一致推送 / 启动引导 ——
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus>(getCloudStatus());
+
+  useEffect(() => onCloudStatusChange(setCloudStatus), []);
+
+  // 设置类变更（提醒设置/主题）尽力推云：失败静默，下次成功时整体覆盖
+  useEffect(() => {
+    if (!isCloudConfigured()) return;
+    pushSettings({ taskReminder: reminderSettings, habitReminder, theme });
+  }, [reminderSettings, habitReminder, theme]);
+
+  // 启动引导：拉云端全量覆盖本地（云端为权威源）；云端为空且本地有数据时执行首次迁移
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const snapshot = await hydrateFromCloud();
+      if (cancelled || snapshot === null) return;
+      const taskState = useTaskStore.getState();
+      const habitState = useHabitStore.getState();
+
+      useTaskStore.setState({
+        tasks: snapshot.tasks,
+        ...(snapshot.settings?.taskReminder ? { reminderSettings: snapshot.settings.taskReminder } : {}),
+        ...(snapshot.settings?.theme ? { theme: snapshot.settings.theme } : {}),
+      });
+      useHabitStore.setState({
+        templates: snapshot.templates,
+        completions: snapshot.completions,
+        ...(snapshot.settings?.habitReminder ? { reminderSettings: snapshot.settings.habitReminder } : {}),
+      });
+
+      // 首次迁移：云端没有任何任务，但本地已有数据 → 全量上传一次（幂等，可重跑）
+      if (snapshot.tasks.length === 0) {
+        const hadLocalData = taskState.tasks.length > 0 || habitState.templates.length > 0;
+        if (hadLocalData) {
+          const result = await uploadLocalToCloud({
+            tasks: taskState.tasks,
+            templates: habitState.templates,
+            completions: habitState.completions,
+            settings: {
+              taskReminder: taskState.reminderSettings,
+              habitReminder: habitState.reminderSettings,
+              theme: taskState.theme,
+            },
+          });
+          if (result.ok) addToast('已同步到云端（首次迁移完成）');
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [addToast]);
 
   // 每次运行（页面加载）时：检查未完成的任务与习惯，弹出清单并（已授权且非静默时段时）发送系统通知。
   // 弹窗与通知均为「每天一次」：弹窗可点「今天不再提醒」关闭当天，通知当天只发一次。
@@ -169,13 +234,15 @@ export default function App() {
   };
 
   // 番茄钟完成时标记任务完成（与卡片完成逻辑一致：重复任务生成下一周期副本）
-  const handleMarkDoneFromFocus = (task: Task) => {
+  const handleMarkDoneFromFocus = async (task: Task) => {
     const wasOverdue = isOverdue(task.startDate, task.dueDate, task.status);
     if (task.repeat !== undefined) {
-      const next = useTaskStore.getState().completeRecurring(task.id);
+      const next = await useTaskStore.getState().completeRecurring(task.id);
+      if (next === undefined) return; // 云写失败，保持弹窗可重试
       addToast(next !== null ? '任务已完成，已生成下一周期任务' : '任务已完成');
     } else {
-      useTaskStore.getState().toggleDone(task.id);
+      const ok = await useTaskStore.getState().toggleDone(task.id);
+      if (!ok) return; // 云写失败，保持弹窗可重试
       addToast(wasOverdue ? '任务已完成（已逾期）' : '任务已完成');
     }
     setFocusTask(null);
@@ -200,6 +267,14 @@ export default function App() {
     <div className="min-h-screen bg-background text-foreground transition-colors">
       <Header view={view} onSwitchView={setView} onOpenSettings={handleOpenSettings} onCreate={handleCreate} />
       <PermissionBanner />
+
+      {cloudStatus === 'failed' && (
+        <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+          <div className="mt-3 flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm text-amber-800 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+            <span>云端未连接，当前为本地模式（数据仅保存在本机）。请在项目根目录 <code className="rounded bg-amber-100 px-1 dark:bg-amber-900/50">.env</code> 中配置 <code className="rounded bg-amber-100 px-1 dark:bg-amber-900/50">VITE_CLOUDBASE_ENV</code> 并开通云开发。</span>
+          </div>
+        </div>
+      )}
 
       <main className="mx-auto max-w-7xl space-y-4 px-4 py-6 sm:px-6 lg:px-8">
         {view === 'board' ? (
